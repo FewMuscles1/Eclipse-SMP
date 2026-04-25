@@ -1,0 +1,186 @@
+package fr.Boulldogo.LinkCord.Commands;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import org.bukkit.Bukkit;
+import org.bukkit.OfflinePlayer;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandExecutor;
+import org.bukkit.command.CommandSender;
+import org.bukkit.command.TabCompleter;
+import org.bukkit.entity.Player;
+
+import fr.Boulldogo.LinkCord.LinkCord;
+import fr.Boulldogo.LinkCord.Events.DiscordRewardsCommandEvent;
+import fr.Boulldogo.LinkCord.Events.DiscordUnlinkEvent;
+import fr.Boulldogo.LinkCord.Events.RewardReason;
+import fr.Boulldogo.LinkCord.Utils.LinkCodeUtils;
+import fr.Boulldogo.LinkCord.Utils.PlayerUtils;
+import fr.Boulldogo.LinkCord.Utils.JSON.DiscordPlayerLink;
+import fr.Boulldogo.LinkCord.Utils.JSON.LinksManager;
+import net.md_5.bungee.api.ChatColor;
+
+public class UnlinkCommand implements CommandExecutor, TabCompleter{
+	
+	private final LinkCord plugin;
+	
+    private List<String> unlinkCommands = new ArrayList<>();
+	
+	public UnlinkCommand(LinkCord plugin) {
+		this.plugin = plugin;
+		
+        unlinkCommands = plugin.getConfig().getStringList("executed-commands-when-player-unlink");
+	}
+
+	@Override
+	public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+		if(!(sender instanceof Player)) {
+			sender.sendMessage("Only online players can be use that command !");
+			return true;
+		}
+		
+    	String prefix = plugin.getConfig().getBoolean("use-prefix") ? translateString(plugin.getConfig().getString("prefix")) : "";
+		
+		Player player =(Player) sender;
+		
+		if(!player.hasPermission("linkcord.unlink")) {
+			player.sendMessage(prefix + translateString(plugin.getConfig().getString("messages.no-permission")));
+			return true;
+		}
+		
+		if(args.length < 1) {
+			LinksManager ges = plugin.getLinksManager();
+			
+			if(plugin.getConfig().getBoolean("disable-self-unlink")) {
+				player.sendMessage(prefix + translateString(plugin.getConfig().getString("messages.self-unlink-disable")));
+				return true;
+			}
+			
+			if(!ges.isPlayerLinked(player.getUniqueId())) {
+				player.sendMessage(prefix + translateString(plugin.getConfig().getString("messages.account-not-linked")));
+				return true;
+			}
+			
+			LinkCodeUtils utils = plugin.getCodeUtils();
+			int code = utils.getPlayerCode(player);
+			
+			player.sendMessage(prefix + translateString(plugin.getConfig().getString("messages.unlink-give-code")
+					.replace("%code", String.valueOf(code))));
+			return true;
+		} else {
+			if(!player.hasPermission("linkcord.force-unlink")) {
+				player.sendMessage(prefix + translateString(plugin.getConfig().getString("messages.no-permission")));
+				return true;
+			}
+			
+			if(args.length < 2) {
+				player.sendMessage(prefix + translateString(plugin.getConfig().getString("messages.usage-unlink-force")));
+				return true;
+			}
+			
+			if(!args[0].equals("force")) {
+				player.sendMessage(prefix + translateString(plugin.getConfig().getString("messages.usage-unlink-force")));
+				return true;
+			}
+			
+			String playerName = args[1];
+			
+			@SuppressWarnings("deprecation")
+			OfflinePlayer p = Bukkit.getOfflinePlayer(playerName);
+			
+			if(p == null) {
+				player.sendMessage(prefix + translateString(plugin.getConfig().getString("messages.invalid-player")));
+				return true;
+			}
+			
+			UUID playerUUID = p.getUniqueId();
+			LinksManager ges = plugin.getLinksManager();
+			
+			if(!ges.isPlayerLinked(playerUUID)) {
+				player.sendMessage(prefix + translateString(plugin.getConfig().getString("messages.account-not-linked")));
+				return true;
+			}
+			
+			DiscordPlayerLink link = ges.getLinkFor(playerUUID);
+			PlayerUtils utils = plugin.getPlayerUtils();
+			utils.removeAllLinkedRoles(p);
+			
+            if(plugin.getConfig().getBoolean("remove-specific-roles-on-unlink")) {
+            	for(String roleId : plugin.getConfig().getStringList("roles-to-remove-on-unlink")) {
+    	            Long finalId = Long.parseLong(roleId);
+                    plugin.checkAndDeleteDiscordRole(player, finalId);
+            	}
+            }
+			
+			String accountName = link.getTag();
+	    	String accountID = link.getDiscordId();
+			
+			List<String> executedCommands = new ArrayList<>();
+			
+	        Bukkit.getScheduler().runTask(plugin,() -> {
+	        	if(!unlinkCommands.isEmpty()) {
+	        		unlinkCommands.forEach(cmd -> {
+	    				String finalCommand = cmd.replace("%player", playerName);
+	    				plugin.getLogger().info("Dispatch command /" + finalCommand + " for player " + playerName + "(Due to force unlink)");
+	    				Bukkit.dispatchCommand(Bukkit.getConsoleSender(), finalCommand);
+	    				executedCommands.add("/" + finalCommand);
+	    				DiscordRewardsCommandEvent event = new DiscordRewardsCommandEvent(player.getName(), "/" + finalCommand, accountName, accountID, RewardReason.UNLINK);
+	    				Bukkit.getServer().getPluginManager().callEvent(event);
+	        		});
+	        	}
+	        });
+			
+			Bukkit.getScheduler().runTask(plugin,() -> {
+				DiscordUnlinkEvent event = new DiscordUnlinkEvent(playerName, executedCommands, accountName, accountID);
+				Bukkit.getPluginManager().callEvent(event);	
+			});
+			
+			if(plugin.getConfig().getBoolean("remove-player-linked-roles-on-unlink")) {
+				plugin.getPlayerUtils().removeAllLinkedRoles(player);
+			}	
+	    	
+	    	ges.removePlayer(playerUUID);
+	    	
+	    	if(p.isOnline()) {
+		    	player.sendMessage(prefix + translateString(plugin.getConfig().getString("messages.account-correctly-unlinked")));
+	    	}
+	    	
+	    	plugin.getLogger().info(playerName + " correctly unlinked his account from discord account " + accountName + " !");  	
+
+			player.sendMessage(prefix + translateString(plugin.getConfig().getString("messages.account-correctly-unlinked")));
+			return true;	
+		}
+	}
+	
+
+	@Override
+	public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+	    List<String> completions = new ArrayList<>();
+
+	    if(!(sender instanceof Player)) {
+	        return null;
+	    }
+
+	    if(args.length == 1) {
+	        completions.add("force");
+	    } 
+
+	    else if(args.length == 2 && args[0].equalsIgnoreCase("force")) {
+	        for(Player player : Bukkit.getOnlinePlayers()) {
+	            completions.add(player.getName());
+	        }
+	    }
+
+	    return completions.stream()
+	        .filter(completion -> completion.toLowerCase().startsWith(args[args.length - 1].toLowerCase()))
+	        .collect(Collectors.toList());
+	}
+
+
+    public String translateString(String s) {
+    	return ChatColor.translateAlternateColorCodes('&', s);
+    }
+}
